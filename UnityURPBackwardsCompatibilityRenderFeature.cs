@@ -12,9 +12,9 @@ namespace URPMigration
 {
     public class UnityURPBackwardsCompatibilityRenderFeature : ScriptableRendererFeature
     {
-        private static RTHandle _globalRenderTexture;
+        private static RTHandle GlobalRenderTexture;
         
-        public static string FrameTextureName { get; set; } = "_FrameTextureHolder";
+        public static string TextureName { get; set; } = "_CompatibilityRenderTextureHolder";
 
         // Custom pass data
         private class PassData
@@ -36,58 +36,26 @@ namespace URPMigration
             RenderTextureDescriptor rtd =
                 new RenderTextureDescriptor(descriptor.width, descriptor.height, descriptor.colorFormat, 0);
             rtd.msaaSamples = 1;
-            RenderingUtils.ReAllocateHandleIfNeeded(ref globalRenderTexture, rtd, name: FrameTextureName);
-            
-
+            RenderingUtils.ReAllocateHandleIfNeeded(ref globalRenderTexture, rtd, name: TextureName);
             outTex = renderGraph.ImportTexture(globalRenderTexture);
         }
-
-        public class ClearWithColorPass : ScriptableRenderPass
+        
+        public class CameraColorTextureToTexturePass : ScriptableRenderPass
         {
-            private readonly Color _cameraClearColor;
-            public ClearWithColorPass(Camera camera)
+            public CameraColorTextureToTexturePass()
             {
-                if (camera == null)
-                {
-                    throw new ArgumentNullException("Cannot clear with null camera.");
-                }
-
-                if (camera.clearFlags != CameraClearFlags.SolidColor)
-                {
-                    throw new NotImplementedException("This pass should only be used for solid color clear.");
-                }
-
+                renderPassEvent = (RenderPassEvent)999;
                 ConfigureInput(ScriptableRenderPassInput.Color);
-                _cameraClearColor = camera.backgroundColor;
             }
             
-            public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
-            {
-                using (var builder =
-                       renderGraph.AddRasterRenderPass<ClearPassData>("Clear with color", out var passData))
-                {
-                    var resourceData = frameData.Get<UniversalResourceData>();
-                    passData.Color = _cameraClearColor; 
-                    passData.Destination = resourceData.activeColorTexture;
-                    builder.SetRenderAttachment(passData.Destination, 0);
-                    builder.SetRenderFunc(static (ClearPassData passData, RasterGraphContext context) =>
-                    {
-                        context.cmd.ClearRenderTarget(false, true, passData.Color);
-                    });
-                }
-            }
-        }
-        
-        public class FrameBufferToTexturePass : ScriptableRenderPass
-        {
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
             {
                 var resourceData = frameData.Get<UniversalResourceData>();
                 
                 //renderGraph.AddCopyPass(resourceData.activeColorTexture, destinationTextureHandle, passName: "Frame to texture copy");
-                using (var builder = renderGraph.AddRasterRenderPass<PassData>("Texture to frame buffer", out var passData))
+                using (var builder = renderGraph.AddRasterRenderPass<PassData>("Camera Color Texture to texture", out var passData))
                 {
-                    TidyAndImportTexture(renderGraph, resourceData, ref _globalRenderTexture,
+                    TidyAndImportTexture(renderGraph, resourceData, ref GlobalRenderTexture,
                         out TextureHandle destinationTextureHandle);
                     passData.Source = resourceData.activeColorTexture;
                     passData.Destination = destinationTextureHandle;
@@ -102,16 +70,28 @@ namespace URPMigration
             }
         }
         
-        public class TextureToFrameBufferPass : ScriptableRenderPass
+        public class TextureToCameraColorTexturePass : ScriptableRenderPass
         {
+            private Camera _camera;
+
+            public TextureToCameraColorTexturePass()
+            {
+                renderPassEvent = RenderPassEvent.BeforeRenderingPrePasses;
+                ConfigureInput(ScriptableRenderPassInput.Color);
+            }
+            public void Setup(RenderingData renderingData)
+            {
+                _camera = renderingData.cameraData.camera;
+            }
+            
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
             {
                 var resourceData = frameData.Get<UniversalResourceData>();
                 
                 //renderGraph.AddCopyPass(sourceTextureHandle, resourceData.activeColorTexture, passName: "Texture to frame pass");
-                using (var builder = renderGraph.AddRasterRenderPass<PassData>("Texture to frame buffer", out var passData))
+                using (var builder = renderGraph.AddRasterRenderPass<PassData>("Texture to camera color texture", out var passData))
                 {
-                    TidyAndImportTexture(renderGraph, resourceData, ref _globalRenderTexture,
+                    TidyAndImportTexture(renderGraph, resourceData, ref GlobalRenderTexture,
                         out TextureHandle sourceTextureHandle);
                     passData.Source = sourceTextureHandle;
                     passData.Destination = resourceData.activeColorTexture;
@@ -123,49 +103,50 @@ namespace URPMigration
                         Blitter.BlitTexture(context.cmd, passData.Source, new Vector4(1,1,0,0), 0, false);
                     });
                 }
+
+                if (_camera != null && _camera.clearFlags == CameraClearFlags.SolidColor)
+                {
+                    using (var builder =
+                           renderGraph.AddRasterRenderPass<ClearPassData>("Clear with color", out var passData))
+                    {
+                        passData.Color = _camera.backgroundColor; 
+                        passData.Destination = resourceData.activeColorTexture;
+                        builder.SetRenderAttachment(passData.Destination, 0);
+                        builder.SetRenderFunc(static (ClearPassData passData, RasterGraphContext context) =>
+                        {
+                            context.cmd.ClearRenderTarget(false, true, passData.Color);
+                        });
+                    }
+                }
             }
         }
         
         #region runtime 
-        private FrameBufferToTexturePass _frameBufferToTexturePass;
-        private TextureToFrameBufferPass _textureToFrameBufferPass;
+        private CameraColorTextureToTexturePass _cameraColorTextureToTexturePass;
+        private TextureToCameraColorTexturePass _textureToCameraColorTexturePass;
         #endregion
         
         public override void Create()
         {
-            _globalRenderTexture = null; // Allocate on first pass
-            _textureToFrameBufferPass = new TextureToFrameBufferPass();
-            _textureToFrameBufferPass.renderPassEvent = RenderPassEvent.BeforeRenderingPrePasses;
-            _textureToFrameBufferPass.ConfigureInput(ScriptableRenderPassInput.Color);
-            _frameBufferToTexturePass = new FrameBufferToTexturePass();
-            _frameBufferToTexturePass.renderPassEvent = (RenderPassEvent)999;
-            _frameBufferToTexturePass.ConfigureInput(ScriptableRenderPassInput.Color);
+            GlobalRenderTexture = null; // Allocate on first pass
+            _textureToCameraColorTexturePass = new TextureToCameraColorTexturePass();
+            _cameraColorTextureToTexturePass = new CameraColorTextureToTexturePass();
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
             if (renderingData.cameraData.cameraType == CameraType.Game)
             {
-                renderer.EnqueuePass(_textureToFrameBufferPass);
-                if (renderingData.cameraData.camera.clearFlags.HasFlag(CameraClearFlags.Color))
-                {
-                    // URP / SRP seems not to do clearing for the color
-                    // .. or more likely its timed so that it gets overriden by the frame buffer write
-                    
-                    // Hence clear manually
-                    //Debug.Log("Setting up clearing background for " + renderingData.cameraData.camera.name);
-                    var pass = new ClearWithColorPass(renderingData.cameraData.camera);
-                    pass.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses;
-                    renderer.EnqueuePass(pass);
-                }
-                renderer.EnqueuePass(_frameBufferToTexturePass);
+                _textureToCameraColorTexturePass.Setup(renderingData);
+                renderer.EnqueuePass(_textureToCameraColorTexturePass);
+                renderer.EnqueuePass(_cameraColorTextureToTexturePass);
             }
         }
 
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            _globalRenderTexture?.Release();
+            GlobalRenderTexture?.Release();
         }
     }
 }
