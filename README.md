@@ -13,3 +13,12 @@ Script can probably be improved like:
 1) Not preventing blitting last frame if current camera does clear the color buffer anyway...
 2) API document is for me difficult to read and some of its outdated. Hence there is probably things that are not required.
 3) Because aggressive URP development expect this to break in next version.
+
+How to use:
+1) Download files and copy under project
+2) Find URP renderer settings file that defines which render features are used 
+3) Add the Render Feature to the rendenrer
+4) Test
+5) Profit
+<img width="533" height="737" alt="Näyttökuva 2026-06-23 kello 10 57 39" src="https://github.com/user-attachments/assets/2c70150b-2571-4337-b5d3-c10bd76fba62" />
+
